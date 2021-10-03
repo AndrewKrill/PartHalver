@@ -7,7 +7,10 @@ using HarmonyLib;
 using System.Reflection;
 using System.Collections.Generic;
 using BepInEx.Configuration;
+using ConfigurationManager;
 using System.Linq;
+using UnityEngine.UI;
+using System.IO;
 
 
 namespace PartHalver
@@ -22,13 +25,147 @@ namespace PartHalver
         public new const string
             PluginGuid = "PolyTech.PartHalver",
             PluginName = "Part Halver",
-            PluginVersion = "1.0.0";
+            PluginVersion = "1.1.0";
 
         public static PartHalver instance;
         public static ConfigEntry<bool> modEnabled;
         public static ConfigEntry<BepInEx.Configuration.KeyboardShortcut> splitKey;
-        public static ConfigEntry<int> numParts;
+        public static ConfigEntry<BepInEx.Configuration.KeyboardShortcut> menuKey;		
         Harmony harmony;
+		
+		// Added by Piecat, for splitting controlled by in-game UI
+		private bool splitRequested = false;
+		
+		internal Rect WindowRect { get; private set; }
+        internal int LeftColumnWidth { get; private set; }
+        internal int RightColumnWidth { get; private set; }
+        private bool _displayingWindow = false;
+        private Texture2D WindowBackground;
+        private int inputWidth = 50;
+        public Vector2 scrollPosition;
+		
+	    public static ConfigEntry<bool>
+            logActions,
+            showMice;
+        public static ConfigEntry<float>
+            backupFrequency,
+            writeToLogFrequency;
+        private static ConfigEntry<BepInEx.Configuration.KeyboardShortcut> 
+            _keybind,
+            _toggleChatKeybind,
+            syncLayoutKeybind;
+
+		
+		private void OnGUI(){
+			if (DisplayingWindow)
+			{
+				if (Event.current.type == UnityEngine.EventType.KeyUp && Event.current.keyCode == _keybind.Value.MainKey)
+				{
+					DisplayingWindow = false;
+					return;
+				}
+
+				GUI.Box(WindowRect, GUIContent.none, new GUIStyle { normal = new GUIStyleState { background = WindowBackground } });
+				WindowRect = GUILayout.Window(-69, WindowRect, PartHalverWindow, "Part Halver");
+				EatInputInRect(WindowRect);
+				}
+		}
+
+		private void CalculateWindowRect()
+		{
+			var width = 200;
+			var height = 120;
+			var offsetX = Mathf.RoundToInt((Screen.width - width) / 2f);
+			var offsetY = Mathf.RoundToInt((Screen.height - height) / 2f);
+			WindowRect = new Rect(offsetX, offsetY, width, height);
+
+			LeftColumnWidth = Mathf.RoundToInt(WindowRect.width / 1.5f);
+			RightColumnWidth = (int)WindowRect.width - LeftColumnWidth;
+		}
+
+
+		public static void Horizontal(System.Action block, GUIStyle style = null){
+			if (style != null) GUILayout.BeginHorizontal(style);
+			else GUILayout.BeginHorizontal();
+			block();
+			GUILayout.EndHorizontal();
+		}
+		
+		public static void Vertical(System.Action block, GUIStyle style = null){
+			if (style != null) GUILayout.BeginVertical(style);
+			else GUILayout.BeginVertical();
+			block();
+			GUILayout.EndVertical();
+		}
+
+		public static void DrawHeader(string text){
+			var _style = new GUIStyle(GUI.skin.label)
+			{
+				fontSize = 15
+			};
+			GUILayout.Label(text, _style);
+		}
+
+		private void PartHalverWindow(int id){
+			try {
+				scrollPosition = GUILayout.BeginScrollView(scrollPosition);
+
+				// Settings
+				Vertical(() =>
+				{
+					Horizontal(() => {
+						GUILayout.FlexibleSpace();
+						DrawHeader("Settings");
+						GUILayout.FlexibleSpace();
+					});
+					Horizontal(() =>
+					{
+						GUILayout.Label("Number of Parts");
+						GUIValues.numParts = GUILayout.TextField(GUIValues.numParts, GUILayout.Width(inputWidth));
+					});
+
+					if (GUILayout.Button("Apply Split")){
+						InterfaceAudio.Play("ui_menu_select");
+						splitRequested = true;
+					}				
+
+
+            }, GUI.skin.box);
+			GUI.DragWindow();
+            GUILayout.EndScrollView();
+            }
+            catch (ArgumentException ex){
+                instance.Logger.LogError(ex.Message);
+            }
+        }
+
+        
+        public static void EatInputInRect(Rect eatRect)
+        {
+            if (eatRect.Contains(new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y)))
+                Input.ResetInputAxes();
+        }
+
+        public bool DisplayingWindow
+        {
+            get => _displayingWindow;
+            set
+            {
+                if (_displayingWindow == value) return;
+                _displayingWindow = value;
+
+                if (_displayingWindow)
+                {
+                    CalculateWindowRect();
+                }
+            }
+        }
+
+
+        public static class GUIValues {
+			public static string numParts = "2";
+        }
+		
         void Awake()
         {
             //this.repositoryUrl = "https://github.com/Conqu3red/Template-Mod/"; // repo to check for updates from
@@ -38,9 +175,7 @@ namespace PartHalver
             isCheat = false;
 
             modEnabled = Config.Bind("Part Halver", "modEnabled", true, "Enable Mod");
-            splitKey = Config.Bind("Part Halver", "Split Keybind", new BepInEx.Configuration.KeyboardShortcut(KeyCode.M), "Split Keybind");
-            numParts = Config.Bind("Part Halver", "Number of Parts", 2, "Number of parts to split each selected edge into");
-
+            menuKey = Config.Bind("Part Halver", "Menu Keybind", new BepInEx.Configuration.KeyboardShortcut(KeyCode.M), "Menu");
             modEnabled.SettingChanged += onEnableDisable;
             
             this.isEnabled = modEnabled.Value;
@@ -57,8 +192,9 @@ namespace PartHalver
         {
             // do something idk
             typeof(BridgeSelectionSet).Assembly.GetType("BridgeActions");
-        }
 
+
+        }
 
         public void onEnableDisable(object sender, EventArgs e)
         {
@@ -82,6 +218,13 @@ namespace PartHalver
             modEnabled.Value = false;
         }
 
+
+        public static void RaiseInputError(string error){
+            //GUIValues.ConnectionResponse = $"<color=red>Incorrect Input: {error}</color>";
+			//TODO
+        }
+
+
         public bool shouldRun()
         {
             return PolyTechMain.ptfInstance.isEnabled && this.isEnabled;
@@ -89,8 +232,23 @@ namespace PartHalver
 
         void Update()
         {
-            if (shouldRun() && splitKey.Value.IsUp())
-            {
+			if(shouldRun() && menuKey.Value.IsUp())
+			{
+				DisplayingWindow = !DisplayingWindow;
+			}
+			
+            if (shouldRun() && splitRequested == true)
+            {				
+
+				int numParts;
+				try {
+					numParts = int.Parse(GUIValues.numParts);
+				}
+				catch {
+					RaiseInputError("Number of Parts must be int");
+					return;
+				}
+
                 // begin undo/redo frame
                 PublicBridgeActions.StartRecording();
                 
@@ -102,7 +260,7 @@ namespace PartHalver
                 {
                     if (edge.isActiveAndEnabled)
                     {
-                        splitEdge(edge, numParts.Value);
+                        splitEdge(edge, numParts);
 
                         edge.ForceDisable();
 	            	    edge.SetStressColor(0f);
@@ -116,6 +274,9 @@ namespace PartHalver
                 // end undo/redo frame
                 PublicBridgeActions.FlushRecording();
             }
+			splitRequested = false;
+
+			
         }
 
         void splitEdge(BridgeEdge edge, int numParts)
